@@ -141,7 +141,8 @@ jobs:
             echo "--- $f"
             "$APKSIGNER" verify --print-certs "$f"
             ACTUAL=$("$APKSIGNER" verify --print-certs "$f" \
-              | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1 | tr 'A-F' 'a-f')
+              | grep -i 'certificate SHA-256 digest' | head -n1 \
+              | awk '{print tolower($NF)}' | tr -d ':')
             if [ "$ACTUAL" != "$EXPECTED" ]; then
               echo "::error::Signature certificate mismatch for $f: got ${ACTUAL:-none}, expected ${EXPECTED}"
               exit 1
