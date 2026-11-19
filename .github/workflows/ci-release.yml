@@ -1,37 +1,77 @@
 name: CI Release
 
+# Builds signed release APKs and publishes them as a GitHub Release.
+#
+# The signing keystore lives in repository secrets (KEYSTORE_BASE64 /
+# KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD), so every future release is
+# signed with the exact same certificate and installs as an in-place update
+# over previous versions.
 on:
+  push:
+    tags: ['v*']
   workflow_run:
     workflows: [CI Build]
     types: [completed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (leave empty for the highest v* tag)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
 
+concurrency:
+  group: ci-release
+  cancel-in-progress: false
+
 jobs:
   release-apk:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Get latest tag
-        id: tag
-        run: |
-          TAG=$(gh api repos/${{ github.repository }}/tags --jq '.[0].name' 2>/dev/null || echo "")
-          if [ -z "$TAG" ]; then
-            echo "No tag found, skipping release"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: actions/checkout@v4
-        if: steps.tag.outputs.skip != 'true'
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG=""
+          if [ "$EVENT_NAME" = "push" ]; then
+            TAG="$REF_NAME"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          fi
+          if [ -z "$TAG" ]; then
+            TAG=$(git ls-remote --tags --refs origin 'v*' \
+              | awk -F/ '{print $NF}' | sort -V | tail -n1)
+          fi
+          if [ -z "$TAG" ]; then
+            if [ "$EVENT_NAME" = "workflow_run" ]; then
+              echo "::notice::No v* tag found yet; nothing to release."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::No v* tag found, nothing to release."
+            exit 1
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            git fetch --tags --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          fi
+          git checkout --detach "refs/tags/$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Building tag $TAG"
 
       - name: Set up JDK 17
         if: steps.tag.outputs.skip != 'true'
@@ -44,55 +84,92 @@ jobs:
         if: steps.tag.outputs.skip != 'true'
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Decode keystore
-        if: steps.tag.outputs.skip != 'true' && env.KEYSTORE_BASE64 != ''
+      - name: Decode and verify signing keystore
+        if: steps.tag.outputs.skip != 'true'
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > "${GITHUB_WORKSPACE}/release.jks"
-          echo "KEYSTORE_FILE=${GITHUB_WORKSPACE}/release.jks" >> "$GITHUB_ENV"
-          echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
-          echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_ENV"
-          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::error::KEYSTORE_BASE64 secret is missing; refusing to publish an unsigned APK."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "${GITHUB_WORKSPACE}/release.jks"
+          {
+            echo "KEYSTORE_FILE=${GITHUB_WORKSPACE}/release.jks"
+            echo "KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD}"
+            echo "KEY_ALIAS=${KEY_ALIAS}"
+            echo "KEY_PASSWORD=${KEY_PASSWORD}"
+          } >> "$GITHUB_ENV"
+          FINGERPRINT=$(keytool -list -v -keystore "${GITHUB_WORKSPACE}/release.jks" \
+            -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" \
+            | grep 'SHA256:' | head -n1 | sed 's/.*SHA256: //')
+          echo "SIGNING_CERT_SHA256=${FINGERPRINT}" >> "$GITHUB_ENV"
+          echo "Signing certificate SHA-256: ${FINGERPRINT}"
 
-      - name: Build release APKs
-        if: steps.tag.outputs.skip != 'true' && env.KEYSTORE_FILE != ''
-        run: ./gradlew :Application:assembleDatabaseRelease :Application:assembleSystemRelease
+      - name: Build signed release APKs
+        if: steps.tag.outputs.skip != 'true'
+        run: ./gradlew --no-daemon :Application:assembleDatabaseRelease :Application:assembleSystemRelease
 
-      - name: Build debug APKs (no signing key)
-        if: steps.tag.outputs.skip != 'true' && env.KEYSTORE_FILE == ''
-        run: ./gradlew :Application:assembleDatabaseDebug :Application:assembleSystemDebug
-
-      - name: Rename APKs
+      - name: Collect and verify APKs
         if: steps.tag.outputs.skip != 'true'
         id: apks
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          VERSION="${TAG#v}"
+          set -euo pipefail
+          VERSION="${{ steps.tag.outputs.version }}"
           mkdir -p release-apks
+          for apk in $(find Application/build/outputs/apk -name '*.apk' -type f); do
+            case "$apk" in
+              *database*) cp "$apk" "release-apks/usageDirectPlus-database-${VERSION}.apk" ;;
+              *system*)   cp "$apk" "release-apks/usageDirectPlus-system-${VERSION}.apk" ;;
+            esac
+          done
+          ls -la release-apks/
+          test -f "release-apks/usageDirectPlus-database-${VERSION}.apk" || {
+            echo "::error::database APK missing"; exit 1; }
 
-          if [ -n "${KEYSTORE_FILE:-}" ]; then
-            BUILD_TYPE="release"
-          else
-            BUILD_TYPE="debug"
-          fi
-
-          find Application/build/outputs/apk -name "*.apk" -type f | while read apk; do
-            if echo "$apk" | grep -q "database"; then
-              cp "$apk" "release-apks/usageDirectPlus-database-${VERSION}.apk"
-            elif echo "$apk" | grep -q "system"; then
-              cp "$apk" "release-apks/usageDirectPlus-system-${VERSION}.apk"
-            fi
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n1)
+          for f in release-apks/*.apk; do
+            echo "--- $f"
+            "$APKSIGNER" verify --print-certs "$f" | grep -E 'Signer #1 certificate (DN|SHA-256)' || true
           done
 
-          ls -la release-apks/
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Extract release notes
+        if: steps.tag.outputs.skip != 'true'
+        id: notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.tag.outputs.version }}"
+          BODY=$(awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" {flag=1}
+            flag && /^## \[/ && $0 !~ "^## \\[" ver "\\]" {exit}
+            flag {print}
+          ' CHANGELOG.md || true)
+          if [ -z "$BODY" ]; then
+            BODY="Release ${VERSION}"
+          fi
+          {
+            echo "## 安装包 / Installers"
+            echo ""
+            echo "- \`usageDirectPlus-database-${VERSION}.apk\` — 标准版（读取系统使用情况数据库）"
+            echo "- \`usageDirectPlus-system-${VERSION}.apk\` — 系统应用变体"
+            echo ""
+            echo "签名证书 SHA-256: \`${SIGNING_CERT_SHA256}\`"
+            echo ""
+            echo "$BODY"
+          } > release-notes.md
+          cat release-notes.md
 
-      - name: Create GitHub Release
+      - name: Publish GitHub Release
         if: steps.tag.outputs.skip != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
+          body_path: release-notes.md
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: release-apks/*.apk
