@@ -172,6 +172,16 @@ val buildRustAndroid by tasks.registering(Exec::class) {
     val outputDir = rustJniLibsDir.get().asFile
     workingDir(rootProject.file("native/usage-core"))
     outputs.dir(outputDir)
+    onlyIf {
+        val available = runCatching {
+            ProcessBuilder("cargo", "ndk", "--version")
+                .redirectErrorStream(true)
+                .start()
+                .waitFor() == 0
+        }.getOrDefault(false)
+        if (!available) logger.lifecycle("cargo-ndk is unavailable; using the Kotlin aggregation fallback")
+        available
+    }
     doFirst { outputDir.mkdirs() }
     commandLine(
         "cargo", "ndk",
