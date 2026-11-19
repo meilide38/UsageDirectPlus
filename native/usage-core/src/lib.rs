@@ -27,11 +27,11 @@ pub fn aggregate_durations(
 
 #[no_mangle]
 pub extern "system" fn Java_godau_fynn_usagedirectplus_wrapper_RustUsageCore_nativeAggregate(
-    mut env: JNIEnv,
-    _class: JClass,
-    begin_array: JLongArray,
-    end_array: JLongArray,
-    app_index_array: JIntArray,
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    begin_array: JLongArray<'_>,
+    end_array: JLongArray<'_>,
+    app_index_array: JIntArray<'_>,
     app_count: jint,
 ) -> jlongArray {
     let result = (|| -> jni::errors::Result<jlongArray> {
