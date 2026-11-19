@@ -131,10 +131,22 @@ jobs:
           test -f "release-apks/usageDirectPlus-database-${VERSION}.apk" || {
             echo "::error::database APK missing"; exit 1; }
 
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n1)
+          APKSIGNER=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner -type f | sort -V | tail -n1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found in the Android SDK"
+            exit 1
+          fi
+          EXPECTED=$(echo "$SIGNING_CERT_SHA256" | tr -d ':' | tr 'A-F' 'a-f')
           for f in release-apks/*.apk; do
             echo "--- $f"
-            "$APKSIGNER" verify --print-certs "$f" | grep -E 'Signer #1 certificate (DN|SHA-256)' || true
+            "$APKSIGNER" verify --print-certs "$f"
+            ACTUAL=$("$APKSIGNER" verify --print-certs "$f" \
+              | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1 | tr 'A-F' 'a-f')
+            if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "::error::Signature certificate mismatch for $f: got ${ACTUAL:-none}, expected ${EXPECTED}"
+              exit 1
+            fi
+            echo "signature OK, certificate matches the release keystore"
           done
 
       - name: Extract release notes
