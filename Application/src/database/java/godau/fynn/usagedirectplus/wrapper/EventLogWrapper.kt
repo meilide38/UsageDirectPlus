@@ -8,6 +8,7 @@ import godau.fynn.usagedirectplus.SimpleUsageStat
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.LinkedHashMap
 import java.util.OptionalLong
 import java.util.function.BiConsumer
 
@@ -342,18 +343,20 @@ open class EventLogWrapper(context: Context) : UsageStatsManagerWrapper(context)
             return usageStats
         }
 
-        val applicationTotalForegroundTime = HashMap<String, Long>()
+        // Assign stable integer IDs to packages so the aggregation can run in Rust
+        // without repeatedly crossing JNI for individual intervals.
+        val packageIndexes = LinkedHashMap<String, Int>()
+        val beginTimes = LongArray(foregroundStats.size)
+        val endTimes = LongArray(foregroundStats.size)
+        val appIndexes = IntArray(foregroundStats.size)
 
-        for (foregroundStat in foregroundStats) {
-            if (applicationTotalForegroundTime.containsKey(foregroundStat.packageName)) {
-                val newTotal = applicationTotalForegroundTime[foregroundStat.packageName]!! +
-                    (foregroundStat.endTime - foregroundStat.beginTime)
-                applicationTotalForegroundTime[foregroundStat.packageName] = newTotal
-            } else {
-                applicationTotalForegroundTime[foregroundStat.packageName] =
-                    foregroundStat.endTime - foregroundStat.beginTime
+        foregroundStats.forEachIndexed { index, foregroundStat ->
+            val appIndex = packageIndexes.getOrPut(foregroundStat.packageName) {
+                packageIndexes.size
             }
-
+            beginTimes[index] = foregroundStat.beginTime
+            endTimes[index] = foregroundStat.endTime
+            appIndexes[index] = appIndex
             endConsumer?.accept(foregroundStat.packageName, foregroundStat.endTime)
         }
 
@@ -362,13 +365,35 @@ open class EventLogWrapper(context: Context) : UsageStatsManagerWrapper(context)
             .toLocalDate()
             .toEpochDay()
 
-        for (application in applicationTotalForegroundTime.keys) {
-            usageStats.add(
-                SimpleUsageStat(day, applicationTotalForegroundTime[application]!!, application)
-            )
+        val totals = RustUsageCore.aggregate(
+            beginTimes,
+            endTimes,
+            appIndexes,
+            packageIndexes.size
+        ) ?: aggregateInKotlin(beginTimes, endTimes, appIndexes, packageIndexes.size)
+
+        packageIndexes.forEach { (application, index) ->
+            usageStats.add(SimpleUsageStat(day, totals[index], application))
         }
 
         return usageStats
+    }
+
+    /** Safe fallback for devices/builds where the native library is unavailable. */
+    private fun aggregateInKotlin(
+        beginTimes: LongArray,
+        endTimes: LongArray,
+        appIndexes: IntArray,
+        appCount: Int
+    ): LongArray {
+        val totals = LongArray(appCount)
+        for (index in beginTimes.indices) {
+            val appIndex = appIndexes[index]
+            if (appIndex in totals.indices) {
+                totals[appIndex] += endTimes[index] - beginTimes[index]
+            }
+        }
+        return totals
     }
 
     /**

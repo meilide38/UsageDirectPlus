@@ -80,6 +80,26 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Set up Android NDK
+        if: steps.tag.outputs.skip != 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        if: steps.tag.outputs.skip != 'true'
+        run: |
+          sdkmanager "ndk;25.1.8937393"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.1.8937393" >> "$GITHUB_ENV"
+
+      - name: Set up Rust toolchain
+        if: steps.tag.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Install cargo-ndk
+        if: steps.tag.outputs.skip != 'true'
+        run: cargo install cargo-ndk --locked
+
       - name: Setup Gradle
         if: steps.tag.outputs.skip != 'true'
         uses: gradle/actions/setup-gradle@v4
