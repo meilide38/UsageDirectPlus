@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.4] - 2026-11-19
+
+### Changed
+
+- release APKs are signed with a persistent release key and published automatically by GitHub Actions
+- the release workflow now refuses to publish APKs that are unsigned or signed with an unexpected certificate
+
 ## [0.9.3] - 2026-10-15
 
 ### Fixed
