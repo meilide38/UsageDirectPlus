@@ -6,7 +6,7 @@ A fork of [usageDirect](https://codeberg.org/fynngodau/usageDirect) that adds de
 
 The original usageDirect targeted SDK 28 and was written entirely in Java. This fork has been brought up to 2025-2026 standards:
 
-- **100% Kotlin** — all 91 Java source files converted
+- **Kotlin + Rust** — Android platform integration and UI remain in Kotlin; performance-oriented interval aggregation is being migrated to a Rust native core
 - **Target SDK 34**, min SDK 26 (Android 8.0+)
 - **Kotlin DSL** build files with a Gradle version catalog (`libs.versions.toml`)
 - **Kotlin 2.0**, Room with KSP, Java 17
@@ -14,6 +14,12 @@ The original usageDirect targeted SDK 28 and was written entirely in Java. This 
 - **Coroutines** replacing raw Threads, Timers, and Handlers
 - **AppCompatActivity** and **Activity Result API** replacing deprecated patterns
 - **Material 3** theme and `MaterialAlertDialogBuilder` (database flavor)
+
+## Native Rust core
+
+The database flavor builds `native/usage-core` as an Android shared library for `arm64-v8a` and `armeabi-v7a`. Foreground interval aggregation is executed in Rust through JNI, with a Kotlin fallback if the native library cannot be loaded. The Rust core has independent unit tests, and CI runs them before the Android test/build jobs.
+
+Rust stable, the Android NDK, and `cargo-ndk` are required to build the database flavor from source.
 
 ## What's new
 
