@@ -164,3 +164,25 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.room.testing)
 }
+
+
+// Build the Rust aggregation core as an Android native library.
+val rustJniLibsDir = layout.buildDirectory.dir("generated/rustJniLibs")
+val buildRustAndroid by tasks.registering(Exec::class) {
+    val outputDir = rustJniLibsDir.get().asFile
+    workingDir(rootProject.file("native/usage-core"))
+    outputs.dir(outputDir)
+    doFirst { outputDir.mkdirs() }
+    commandLine(
+        "cargo", "ndk",
+        "-t", "arm64-v8a",
+        "-t", "armeabi-v7a",
+        "-o", outputDir.absolutePath,
+        "build", "--release"
+    )
+}
+
+android.sourceSets.getByName("database").jniLibs.srcDir(rustJniLibsDir)
+tasks.named("preBuild").configure {
+    dependsOn(buildRustAndroid)
+}
